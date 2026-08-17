@@ -20,8 +20,20 @@ class ModalContractTest(unittest.TestCase):
             "outbound_domain_allowlist",
             "inbound_cidr_allowlist",
             "volumes",
+            "encrypted_ports",
+            "readiness_probe",
         ):
             self.assertIn(name, params)
+
+    def test_realtime_sandbox_contracts(self):
+        self.assertTrue(callable(modal.Sandbox.from_id))
+        self.assertTrue(callable(modal.Sandbox.create_connect_token))
+        self.assertTrue(callable(modal.Sandbox.tunnels))
+        self.assertTrue(callable(modal.Sandbox.filesystem.watch))
+
+        exec_params = inspect.signature(modal.Sandbox.exec).parameters
+        for name in ("timeout", "workdir", "env", "secrets", "pty"):
+            self.assertIn(name, exec_params)
 
     def test_snapshot_contract(self):
         params = inspect.signature(modal.Sandbox.snapshot_filesystem).parameters
