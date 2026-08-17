@@ -1,30 +1,24 @@
-# ChatGPT Plus: use GPT Actions
+# 在 ChatGPT 网页版中使用
 
-ChatGPT Plus can create custom GPTs with Actions. Full custom MCP write/execute access in ChatGPT web is currently reserved for Business/Enterprise/Edu, so Plus should use this repo's REST/OpenAPI compatibility layer.
+部署后，同一个 Modal Web Function 同时提供：
 
-After deploying `modal_app.py`, suppose Modal prints:
+- `GET /action-openapi.json`：给自定义 GPT 的 Actions 导入。
+- `/api/*`：GPT Actions 调用的 REST API。
+- `/mcp/`：给支持 Remote MCP 的客户端。
 
-```text
-https://YOUR-ENDPOINT.modal.run
-```
+## GPT Actions
 
-In ChatGPT:
+1. 打开 GPT 编辑器，进入 **Configure → Actions → Create new action**。
+2. 导入 `https://你的-endpoint.modal.run/action-openapi.json`。
+3. Authentication 选择 **API key**。
+4. Auth Type 选择 **Bearer**。
+5. API key 填与 Modal Secret `MODAL_WORKSPACE_MCP_TOKEN` 相同的网关 token。
 
-1. Open **GPTs → Create → Configure → Actions → Create new action**.
-2. Import this schema URL:
-
-```text
-https://YOUR-ENDPOINT.modal.run/action-openapi.json
-```
-
-3. Authentication: **API key → Bearer**.
-4. Set the API key to the same value stored in Modal Secret `MODAL_WORKSPACE_MCP_TOKEN`.
-5. Test `createModalSandbox`, then `executeInModalSandbox`.
-
-Suggested first prompt:
+首次测试建议：
 
 ```text
-Create a Modal Sandbox. Run: apt-get update && apt-get install -y git curl && git --version && curl -I https://github.com . Return stdout/stderr, then terminate the Sandbox.
+创建一个 30 分钟的 Modal Sandbox；启动后台任务执行 apt-get update && apt-get install -y ffmpeg；
+轮询任务直到完成；运行 ffmpeg -version；最后终止 Sandbox。
 ```
 
-The REST Action API and the MCP server use the same underlying implementation, so behavior stays aligned.
+长任务优先走 `startModalSandboxJob` / `getModalSandboxJob`，不要让一次 HTTP Action 长时间阻塞。

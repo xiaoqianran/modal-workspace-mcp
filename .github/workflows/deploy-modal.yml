@@ -26,23 +26,38 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check required GitHub Actions secrets
+        env:
+          GATEWAY_TOKEN: ${{ secrets.MODAL_WORKSPACE_MCP_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$MODAL_TOKEN_ID" || (echo "Missing MODAL_TOKEN_ID" >&2; exit 1)
+          test -n "$MODAL_TOKEN_SECRET" || (echo "Missing MODAL_TOKEN_SECRET" >&2; exit 1)
+          test -n "$GATEWAY_TOKEN" || (echo "Missing MODAL_WORKSPACE_MCP_TOKEN" >&2; exit 1)
+
       - name: Install project
         run: python -m pip install .
+
+      - name: Verify Modal authentication
+        run: modal token info
 
       - name: Create or update gateway secret
         env:
           GATEWAY_TOKEN: ${{ secrets.MODAL_WORKSPACE_MCP_TOKEN }}
           ALLOWED_SECRETS: ${{ vars.MODAL_WORKSPACE_ALLOWED_SECRETS }}
           ALLOWED_VOLUMES: ${{ vars.MODAL_WORKSPACE_ALLOWED_VOLUMES }}
+          DEFAULT_IMAGE_NAME: ${{ vars.MODAL_WORKSPACE_DEFAULT_IMAGE_NAME }}
         run: |
           set -euo pipefail
-          test -n "$GATEWAY_TOKEN"
           args=("MODAL_WORKSPACE_MCP_TOKEN=$GATEWAY_TOKEN")
           if [ -n "${ALLOWED_SECRETS:-}" ]; then
             args+=("MODAL_WORKSPACE_ALLOWED_SECRETS=$ALLOWED_SECRETS")
           fi
           if [ -n "${ALLOWED_VOLUMES:-}" ]; then
             args+=("MODAL_WORKSPACE_ALLOWED_VOLUMES=$ALLOWED_VOLUMES")
+          fi
+          if [ -n "${DEFAULT_IMAGE_NAME:-}" ]; then
+            args+=("MODAL_WORKSPACE_DEFAULT_IMAGE_NAME=$DEFAULT_IMAGE_NAME")
           fi
           modal secret create modal-workspace-mcp-auth --force "${args[@]}"
 

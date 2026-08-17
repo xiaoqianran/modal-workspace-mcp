@@ -4,14 +4,14 @@
     "name": "xiaoqianran"
   },
   "metadata": {
-    "description": "GitHub Copilot plugin marketplace for the Modal workspace MCP bridge",
-    "version": "0.1.0"
+    "description": "Modal Workspace MCP 的 GitHub Copilot 插件市场",
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "modal-workspace",
-      "description": "Give GitHub Copilot remote access to your Modal Sandboxes and deployed Functions through MCP.",
-      "version": "0.1.0",
+      "description": "让 GitHub Copilot 通过 MCP 使用你的 Modal Sandbox 和已部署 Functions。",
+      "version": "0.3.0",
       "source": "plugins/modal-workspace"
     }
   ]

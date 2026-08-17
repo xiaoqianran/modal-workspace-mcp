@@ -1,13 +1,13 @@
 [project]
 name = "modal-workspace-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Remote Modal execution bridge for ChatGPT GPT Actions, MCP clients, and GitHub Copilot"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "xiaoqianran" }]
 dependencies = [
-  "modal>=1.4.1,<2",
+  "modal>=1.5.0,<2",
   "fastapi==0.115.14",
   "fastmcp==2.10.6",
   "pydantic==2.11.10",

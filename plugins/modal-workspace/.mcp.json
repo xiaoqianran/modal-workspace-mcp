@@ -9,11 +9,22 @@
       "tools": [
         "sandbox_create",
         "sandbox_exec",
+        "sandbox_exec_start",
+        "sandbox_job_status",
+        "sandbox_job_cancel",
         "sandbox_status",
         "sandbox_list",
         "sandbox_snapshot",
         "sandbox_terminate",
+        "sandbox_file_read",
+        "sandbox_file_write",
+        "sandbox_file_list",
+        "sandbox_directory_create",
+        "sandbox_file_remove",
         "function_call",
+        "function_spawn",
+        "function_call_get",
+        "function_call_cancel",
         "app_get",
         "app_list"
       ]
