@@ -66,8 +66,8 @@ def web():
 
     api = FastAPI(
         title="Modal Workspace Gateway",
-        version="0.3.2",
-        description="让 ChatGPT / MCP 客户端通过受控 API 使用用户自己的 Modal Sandbox 与已部署 Functions。",
+        version="0.4.0",
+        description="实时远程 Modal Workspace：通过受控 API 使用 Sandbox、增量事件流与已部署 Functions。",
         lifespan=mcp_app.router.lifespan_context,
     )
     api.include_router(action_router)
@@ -111,7 +111,8 @@ def web():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.3.2",
+            "version": "0.4.0",
+            "mode": "realtime-workspace-p0",
             "health": "/healthz",
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
@@ -122,7 +123,8 @@ def web():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.3.2",
+            "version": "0.4.0",
+            "realtime_exec": True,
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
         }
