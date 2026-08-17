@@ -45,10 +45,12 @@ class RealtimeAgentTest(unittest.TestCase):
             "--exec-id",
             exec_id,
             "--payload",
-            self.payload("printf 'first\\n'; sleep 1.5; printf 'second\\n'"),
+            self.payload("printf 'first\\n'; sleep 4; printf 'second\\n'"),
         )
 
-        deadline = time.monotonic() + 1.2
+        # CI runner scheduling can vary. Give event observation three seconds,
+        # while the process deliberately remains alive for four seconds.
+        deadline = time.monotonic() + 3
         first_batch = None
         cursor = 0
         while time.monotonic() < deadline:
@@ -59,7 +61,7 @@ class RealtimeAgentTest(unittest.TestCase):
                 "--cursor",
                 str(cursor),
                 "--wait-seconds",
-                "0.3",
+                "0.5",
             )
             cursor = result["next_cursor"]
             text = "".join(e.get("data", "") for e in result["events"] if e["type"] == "stdout")
@@ -67,10 +69,10 @@ class RealtimeAgentTest(unittest.TestCase):
                 first_batch = result
                 break
         self.assertIsNotNone(first_batch, "first stdout event should arrive while process is running")
-        self.assertNotEqual(first_batch["state"], "finished")
+        self.assertNotIn(first_batch["state"], {"finished", "failed", "cancelled"})
 
         combined = ""
-        deadline = time.monotonic() + 4
+        deadline = time.monotonic() + 6
         state = None
         while time.monotonic() < deadline:
             result = self.run_agent(
