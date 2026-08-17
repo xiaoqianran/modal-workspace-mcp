@@ -66,8 +66,11 @@ def web():
 
     api = FastAPI(
         title="Modal Workspace Gateway",
-        version="0.4.0",
-        description="实时远程 Modal Workspace：通过受控 API 使用 Sandbox、增量事件流与已部署 Functions。",
+        version="0.5.0",
+        description=(
+            "实时 Remote Workspace：稳定 ws-*、增量事件流、GitHub Repo clone/fetch/checkout/status/diff，"
+            "以及底层 Modal Sandbox / Function 能力。"
+        ),
         lifespan=mcp_app.router.lifespan_context,
     )
     api.include_router(action_router)
@@ -111,8 +114,8 @@ def web():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.4.0",
-            "mode": "realtime-workspace-p0",
+            "version": "0.5.0",
+            "mode": "realtime-workspace-repo",
             "health": "/healthz",
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
@@ -123,8 +126,10 @@ def web():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.4.0",
+            "version": "0.5.0",
             "realtime_exec": True,
+            "workspace": True,
+            "github_repo": True,
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
         }

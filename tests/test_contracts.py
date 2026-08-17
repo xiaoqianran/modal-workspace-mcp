@@ -4,6 +4,7 @@ import unittest
 import modal
 from fastmcp import FastMCP
 
+from modal_workspace_mcp.action_api import router
 from modal_workspace_mcp.server import make_mcp_server
 
 
@@ -25,11 +26,18 @@ class ModalContractTest(unittest.TestCase):
         ):
             self.assertIn(name, params)
 
-    def test_realtime_sandbox_contracts(self):
+    def test_realtime_workspace_sandbox_contracts(self):
         self.assertTrue(callable(modal.Sandbox.from_id))
+        self.assertTrue(callable(modal.Sandbox.list))
+        self.assertTrue(callable(modal.Sandbox.get_tags))
+        self.assertTrue(callable(modal.Sandbox.set_tags))
         self.assertTrue(callable(modal.Sandbox.create_connect_token))
         self.assertTrue(callable(modal.Sandbox.tunnels))
         self.assertIsInstance(modal.Sandbox.filesystem, property)
+
+        list_params = inspect.signature(modal.Sandbox.list).parameters
+        self.assertIn("app_id", list_params)
+        self.assertIn("tags", list_params)
 
         exec_params = inspect.signature(modal.Sandbox.exec).parameters
         for name in ("timeout", "workdir", "env", "secrets", "pty"):
@@ -49,6 +57,27 @@ class ModalContractTest(unittest.TestCase):
         self.assertTrue(callable(modal.FunctionCall.from_id))
         self.assertIn("timeout", inspect.signature(modal.FunctionCall.get).parameters)
         self.assertIn("terminate_containers", inspect.signature(modal.FunctionCall.cancel).parameters)
+
+    def test_workspace_and_repo_action_operation_ids(self):
+        operation_ids = {route.operation_id for route in router.routes if getattr(route, "operation_id", None)}
+        expected = {
+            "createRemoteWorkspace",
+            "listRemoteWorkspaces",
+            "getRemoteWorkspace",
+            "terminateRemoteWorkspace",
+            "executeInRemoteWorkspace",
+            "startRealtimeWorkspaceExec",
+            "getRealtimeWorkspaceExecEvents",
+            "getRealtimeWorkspaceExecStatus",
+            "sendRealtimeWorkspaceExecInput",
+            "cancelRealtimeWorkspaceExec",
+            "cloneGitHubRepoToWorkspace",
+            "fetchWorkspaceGitRepo",
+            "checkoutWorkspaceGitRef",
+            "getWorkspaceGitStatus",
+            "getWorkspaceGitDiff",
+        }
+        self.assertTrue(expected.issubset(operation_ids), expected - operation_ids)
 
     def test_fastmcp_contract(self):
         server = make_mcp_server()
