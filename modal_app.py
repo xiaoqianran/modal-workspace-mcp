@@ -9,6 +9,7 @@ app = modal.App(GATEWAY_APP_NAME)
 gateway_image = (
     modal.Image.debian_slim(python_version="3.12")
     .uv_pip_install(
+        "modal==1.5.4",
         "fastapi==0.115.14",
         "fastmcp==2.10.6",
         "pydantic==2.11.10",
@@ -65,7 +66,7 @@ def web():
 
     api = FastAPI(
         title="Modal Workspace Gateway",
-        version="0.3.1",
+        version="0.3.2",
         description="让 ChatGPT / MCP 客户端通过受控 API 使用用户自己的 Modal Sandbox 与已部署 Functions。",
         lifespan=mcp_app.router.lifespan_context,
     )
@@ -110,7 +111,7 @@ def web():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.3.1",
+            "version": "0.3.2",
             "health": "/healthz",
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
@@ -121,7 +122,7 @@ def web():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.3.1",
+            "version": "0.3.2",
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
         }
