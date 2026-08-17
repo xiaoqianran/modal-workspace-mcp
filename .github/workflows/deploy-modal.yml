@@ -62,4 +62,35 @@ jobs:
           modal secret create modal-workspace-mcp-auth --force "${args[@]}"
 
       - name: Deploy
-        run: modal deploy modal_app.py
+        id: deploy
+        run: |
+          set -euo pipefail
+          modal deploy modal_app.py 2>&1 | tee /tmp/modal-deploy.log
+          endpoint="$(grep -Eo 'https://[A-Za-z0-9.-]+\.modal\.run' /tmp/modal-deploy.log | head -n1)"
+          test -n "$endpoint" || (echo "Could not discover deployed Modal endpoint" >&2; exit 1)
+          echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test deployed gateway
+        env:
+          ENDPOINT: ${{ steps.deploy.outputs.endpoint }}
+          GATEWAY_TOKEN: ${{ secrets.MODAL_WORKSPACE_MCP_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "$ENDPOINT/healthz" -o /tmp/health.json
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $GATEWAY_TOKEN" \
+            "$ENDPOINT/api/apps" -o /tmp/apps.json
+          python - <<'PY'
+          import json
+
+          with open('/tmp/health.json', encoding='utf-8') as f:
+              health = json.load(f)
+          if health.get('ok') is not True:
+              raise SystemExit(f"healthz failed: {health!r}")
+
+          with open('/tmp/apps.json', encoding='utf-8') as f:
+              apps = json.load(f)
+          if not isinstance(apps, list):
+              raise SystemExit(f"/api/apps did not return a list: {type(apps).__name__}")
+          print(f"Gateway smoke test passed; /api/apps returned {len(apps)} apps")
+          PY
