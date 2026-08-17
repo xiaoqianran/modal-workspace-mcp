@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "modal-workspace": {
+      "type": "http",
+      "url": "${COPILOT_MCP_MODAL_URL}/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${COPILOT_MCP_MODAL_GATEWAY_TOKEN}"
+      },
+      "tools": [
+        "sandbox_create",
+        "sandbox_exec",
+        "sandbox_status",
+        "sandbox_list",
+        "sandbox_snapshot",
+        "sandbox_terminate",
+        "function_call",
+        "app_get",
+        "app_list"
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "modal-workspace",
+  "description": "Give GitHub Copilot remote access to your Modal Sandboxes and deployed Functions through MCP.",
+  "version": "0.1.0",
+  "author": {
+    "name": "xiaoqianran"
+  },
+  "license": "MIT",
+  "keywords": ["modal", "mcp", "sandbox", "github-copilot", "gpu"],
+  "skills": ["skills/"],
+  "mcpServers": ".mcp.json"
+}

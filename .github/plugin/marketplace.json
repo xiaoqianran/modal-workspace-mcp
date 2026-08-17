@@ -1,0 +1,18 @@
+{
+  "name": "modal-workspace-mcp",
+  "owner": {
+    "name": "xiaoqianran"
+  },
+  "metadata": {
+    "description": "GitHub Copilot plugin marketplace for the Modal workspace MCP bridge",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "modal-workspace",
+      "description": "Give GitHub Copilot remote access to your Modal Sandboxes and deployed Functions through MCP.",
+      "version": "0.1.0",
+      "source": "plugins/modal-workspace"
+    }
+  ]
+}

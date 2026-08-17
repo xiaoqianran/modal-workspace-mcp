@@ -1,0 +1,13 @@
+{
+  "enabledPlugins": {
+    "modal-workspace@modal-workspace-mcp": true
+  },
+  "extraKnownMarketplaces": {
+    "modal-workspace-mcp": {
+      "source": {
+        "source": "github",
+        "repo": "xiaoqianran/modal-workspace-mcp"
+      }
+    }
+  }
+}
