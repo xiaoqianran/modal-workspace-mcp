@@ -2,68 +2,227 @@
 
 `modal-workspace-mcp` 是一个部署在你自己 Modal 账户里的 **实时 Remote Workspace 网关**。
 
-它让 ChatGPT、GitHub Copilot 或其他 MCP Client 把本地无法完成的联网 Shell、`git clone`、依赖安装、编译、GPU 实验、文件操作和 Modal Function 调用交给 Modal Sandbox，并把运行中的输出按增量事件实时取回。
+它的目标不是“远程执行一条命令”，而是让 ChatGPT、GitHub Copilot、MCP Client 或未来 Web UI 获得一个可以持续使用的远程实验工作区：
 
 ```text
-ChatGPT / GitHub Copilot / MCP Client
-                │
-                │ HTTPS + Bearer
-                ▼
-        modal-workspace-mcp
-        ├── /mcp/                 Remote MCP
-        └── /api/*                GPT Actions / REST
-                │
-                ▼
-             Modal Sandbox
-        ├── realtime process runtime
-        ├── apt / git / curl / wget
-        ├── pip / uv
-        ├── CPU / GPU
-        └── Filesystem API
+ChatGPT / Copilot / MCP Client
+              │
+              │ HTTPS + Bearer
+              ▼
+      modal-workspace-mcp
+      ├── /api/*   GPT Actions / REST
+      └── /mcp/    Remote MCP
+              │
+              ▼
+        Remote Workspace (ws-*)
+              │
+        Modal Sandbox (sb-*)
+      ├── realtime process runtime
+      ├── GitHub clone / fetch / checkout
+      ├── apt / curl / wget
+      ├── uv / pip / Python
+      ├── CPU / GPU
+      └── Filesystem
 ```
 
-## v0.4：实时 Runtime P0
+> 对上层 Agent 来说，`ws-*` 是主要对象；`sb-*` 只是底层实现和诊断信息。
 
-v0.4 把执行模型从“提交命令，结束后一次性返回日志”升级为：
+## v0.5：Workspace-first + Realtime GitHub
+
+v0.5 在已经上线的 v0.4 实时 Runtime 上增加两层：
+
+```text
+P0 Realtime Runtime       ✅
+P1 Workspace abstraction  ✅
+P2 Realtime Git / Repo    ✅
+P3 Filesystem watch       下一阶段
+P4 Snapshot / Resume      下一阶段
+P5 Experiment / GPU       下一阶段
+```
+
+### Workspace
+
+每个在线 Workspace 有稳定 ID：
+
+```text
+ws-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Gateway 使用 Modal Sandbox 原生 tags 把 `ws-*` 映射到实际 `sb-*`：
+
+```text
+managed-by=modal-workspace-mcp
+workspace-id=ws-...
+workspace-root=/workspace
+repo-slug=OWNER/REPO      # clone 后
+repo-path=/workspace/repo # clone 后
+repo-ref=main/HEAD/...    # clone/checkout 后
+```
+
+因此不同 HTTP 请求、GPT Action 调用或 MCP 调用都能仅凭 `workspace_id` 找回同一个实时环境。
+
+当前 v0.5 的 Workspace 是**在线态抽象**：Sandbox 终止后该 Workspace 离线。长期恢复/分叉会在 P4 通过 Snapshot + Volume 实现，不假装已经有永久 Workspace 数据库。
+
+## 推荐使用流程
+
+### 1. 创建 Workspace
+
+GPT Action：
+
+```text
+createRemoteWorkspace
+```
+
+MCP：
+
+```text
+workspace_create
+```
+
+返回：
+
+```json
+{
+  "workspace_id": "ws-...",
+  "sandbox_id": "sb-...",
+  "root": "/workspace",
+  "running": true
+}
+```
+
+后续尽量只使用 `workspace_id`。
+
+### 2. 实时拉取 GitHub 仓库
+
+GPT Action：
+
+```text
+cloneGitHubRepoToWorkspace
+```
+
+MCP：
+
+```text
+repo_clone
+```
+
+示例参数：
+
+```json
+{
+  "workspace_id": "ws-...",
+  "repository": "xiaoqianran/modal-workspace-mcp",
+  "ref": "main",
+  "depth": 1
+}
+```
+
+默认 clone 到：
+
+```text
+/workspace/repo
+```
+
+立即返回：
+
+```json
+{
+  "workspace_id": "ws-...",
+  "exec_id": "ex-...",
+  "cursor": 0,
+  "operation": "repo_clone"
+}
+```
+
+然后持续读取：
+
+```text
+getRealtimeWorkspaceExecEvents
+```
+
+或 MCP：
+
+```text
+workspace_realtime_exec_events
+```
+
+始终把上一批的 `next_cursor` 作为下一次 `cursor`。
+
+`git clone --progress` 的 stdout/stderr 会作为增量事件返回，所以大仓库、LFS、下载、编译不会等到任务结束才一次性看到日志。
+
+### 3. 查看 Repo
+
+```text
+getWorkspaceGitStatus
+getWorkspaceGitDiff
+fetchWorkspaceGitRepo
+checkoutWorkspaceGitRef
+```
+
+对应 MCP：
+
+```text
+repo_status
+repo_diff
+repo_fetch
+repo_checkout
+```
+
+`repo_status` 返回结构化信息：
+
+```json
+{
+  "head": "40位commit SHA",
+  "branch": "main",
+  "remote": "https://github.com/OWNER/REPO.git",
+  "status": "## main...origin/main",
+  "clean": true
+}
+```
+
+### 4. 在 Repo 里实时实验
+
+clone 成功后，Workspace 默认 workdir 自动变为 Repo 路径。
+
+例如：
+
+```text
+startRealtimeWorkspaceExec
+command = "uv sync && uv run pytest -q"
+```
+
+无需再告诉 Agent `/workspace/repo`。
+
+## 实时 Runtime
+
+实时执行不是“不断返回整个日志”，而是 append-only event stream：
 
 ```text
 start
   ↓
-立即得到 exec_id
+exec_id + cursor=0
   ↓
-events(cursor=0, wait=15)
+events(cursor=0, wait_seconds=...)
   ↓
-只返回新增 stdout/stderr/status/exit
+只返回新增事件
   ↓
-更新 cursor
+next_cursor
   ↓
 继续 long-poll
 ```
 
-实时进程支持：
-
-- `stdout` / `stderr` 增量事件；
-- 单调递增 `seq` / `cursor`，不会每次重复返回全部历史日志；
-- `wait_seconds` long-poll：没有新事件时等待，有事件立即返回；
-- 跨请求发送 `stdin`；
-- PTY 模式；
-- TERM / INT / HUP / KILL 取消整个进程组；
-- Gateway 重连 Sandbox 后仍能继续查询同一个 `exec_id`。
-
-P0 的事件存储和进程代理运行在 Sandbox 内，不依赖 Gateway 容器内存。Modal `Sandbox.from_id()` 可以跨请求重新连接 Sandbox，但 Modal 当前没有公开的 `ContainerProcess.from_id()`，因此不能把短生命周期的 Python process handle 当作持久实时协议；v0.4 使用 Sandbox 内常驻 worker + append-only event stream 解决这个问题。
-
-### 事件格式
+事件：
 
 ```json
 {
-  "seq": 3,
-  "timestamp": "2026-08-18T00:00:00+00:00",
+  "seq": 42,
+  "timestamp": "...",
   "type": "stdout",
-  "data": "Receiving objects: 42%\n"
+  "data": "Receiving objects: 57%\n"
 }
 ```
 
-当前事件类型：
+类型：
 
 ```text
 status
@@ -73,98 +232,58 @@ error
 exit
 ```
 
-## 实时工具
+支持：
+
+- stdout / stderr 增量读取；
+- cursor；
+- long-poll；
+- stdin；
+- PTY；
+- TERM / INT / HUP / KILL；
+- Gateway 跨请求重新连接同一个 Sandbox 后继续读取。
+
+生产 E2E 已实际验证：进程阻塞等待 stdin 时，Gateway 已经能先取得 stdout；随后另一个 HTTP 请求发送 stdin，再由后续 cursor 请求取得完成事件。
+
+## Workspace API
 
 ### GPT Actions / REST
 
 | operationId | 用途 |
 |---|---|
-| `startRealtimeSandboxExec` | 启动实时进程，立即返回 `exec_id` |
-| `getRealtimeSandboxExecEvents` | 使用 cursor 增量读取事件，可 long-poll |
-| `getRealtimeSandboxExecStatus` | 查询进程状态 / PID / return code |
-| `sendRealtimeSandboxExecInput` | 发送 stdin / EOF |
-| `cancelRealtimeSandboxExec` | TERM / INT / HUP / KILL |
+| `createRemoteWorkspace` | 创建在线 Workspace |
+| `listRemoteWorkspaces` | 列出在线 Workspace |
+| `getRemoteWorkspace` | 用 `ws-*` 查询状态/Repo |
+| `terminateRemoteWorkspace` | 终止 Workspace |
+| `executeInRemoteWorkspace` | 很短的同步命令 |
+| `startRealtimeWorkspaceExec` | 启动实时命令 |
+| `getRealtimeWorkspaceExecEvents` | cursor 增量事件 |
+| `getRealtimeWorkspaceExecStatus` | 进程状态 |
+| `sendRealtimeWorkspaceExecInput` | stdin / EOF |
+| `cancelRealtimeWorkspaceExec` | 发送信号取消 |
+| `cloneGitHubRepoToWorkspace` | 实时 clone GitHub Repo |
+| `fetchWorkspaceGitRepo` | 实时 fetch |
+| `checkoutWorkspaceGitRef` | 实时 checkout |
+| `getWorkspaceGitStatus` | HEAD / branch / remote / status |
+| `getWorkspaceGitDiff` | diff / cached / stat |
 
-### MCP
+Raw `sandbox_*` API 仍保留，作为底层兼容和 escape hatch。
 
-对应 MCP tools：
+## MCP tools
 
-```text
-sandbox_realtime_exec_start
-sandbox_realtime_exec_events
-sandbox_realtime_exec_status
-sandbox_realtime_exec_input
-sandbox_realtime_exec_cancel
-```
-
-旧的：
-
-```text
-sandbox_exec_start
-sandbox_job_status
-sandbox_job_cancel
-```
-
-仍保留兼容，但新工作流应优先使用 realtime exec。
-
-## 一个真正的实时例子
-
-先创建 Sandbox，再启动：
-
-```bash
-for i in $(seq 1 10); do
-  echo "step=$i"
-  sleep 1
-done
-```
-
-`startRealtimeSandboxExec` 会立即返回：
-
-```json
-{
-  "sandbox_id": "sb-...",
-  "exec_id": "ex-...",
-  "state": "starting",
-  "cursor": 0
-}
-```
-
-然后调用：
-
-```text
-getRealtimeSandboxExecEvents(
-  cursor=0,
-  wait_seconds=15
-)
-```
-
-应该在命令结束前就看到：
-
-```text
-step=1
-```
-
-返回 `next_cursor` 后继续请求下一批，而不是重新下载完整 stdout。
-
-## GitHub 仓库拉取 / 中转
-
-这正是项目的主要用途之一。
-
-例如：
-
-```text
-创建一个 Modal Sandbox，
-实时执行：
-  git clone --progress https://github.com/OWNER/REPO.git /workspace/repo
-然后实时返回 clone 进度，完成后执行 git status 和 git rev-parse HEAD。
-```
-
-当前无需专门 Repo API 就已经可以工作：Git 是在 Modal Sandbox 内执行的，所以即使 ChatGPT 自身执行容器没有 GitHub DNS / 外网，也不影响 Sandbox 拉取公开仓库。
-
-下一阶段会在实时 Runtime 上增加正式 Workspace / Repo 层：
+推荐的新工具：
 
 ```text
 workspace_create
+workspace_get
+workspace_list
+workspace_exec
+workspace_realtime_exec_start
+workspace_realtime_exec_events
+workspace_realtime_exec_status
+workspace_realtime_exec_input
+workspace_realtime_exec_cancel
+workspace_terminate
+
 repo_clone
 repo_fetch
 repo_checkout
@@ -172,75 +291,67 @@ repo_status
 repo_diff
 ```
 
-Git 只是 Workspace 的一个 Source，不会成为整个项目的最高层抽象。
+旧 `sandbox_*` 工具继续可用。
 
-## 私有 GitHub 仓库
+## GitHub 中转的安全边界
 
-不要把 GitHub Token 写进命令或仓库 URL。
+Repo API 不允许 Agent 任意把字符串拼成 `git clone` shell。
 
-推荐：
+`repository` 只接受：
 
 ```text
-GitHub token
-   ↓
-Modal Secret
-   ↓
-MODAL_WORKSPACE_ALLOWED_SECRETS allowlist
-   ↓
-Sandbox secret_names
+OWNER/REPO
+https://github.com/OWNER/REPO
+https://github.com/OWNER/REPO.git
 ```
 
-例如先创建 Modal Secret：
+拒绝：
+
+```text
+非 github.com host
+URL 内 username/password/token
+query / fragment
+多余路径
+越界 destination
+危险 Git ref
+```
+
+Git 参数会在服务端验证并 shell quote。
+
+### 私有 GitHub
+
+不要这样：
+
+```text
+https://TOKEN@github.com/OWNER/REPO.git
+```
+
+推荐创建 Modal Secret：
 
 ```bash
 modal secret create github-agent GH_TOKEN="$GH_TOKEN"
 ```
 
-GitHub Variables：
+GitHub Variable：
 
 ```text
 MODAL_WORKSPACE_ALLOWED_SECRETS=github-agent
 ```
 
-之后 Agent 只传 Secret 名称，不传 Secret 值。
+调用 clone/fetch：
 
-## Sandbox 生命周期与基础工具
+```json
+{
+  "secret_names": ["github-agent"],
+  "use_github_token": true
+}
+```
 
-| 工具 | 用途 |
-|---|---|
-| `sandbox_create` | 创建 Modal Sandbox |
-| `sandbox_exec` | 同步执行很短的命令 |
-| `sandbox_status` | 查询 Sandbox 状态 |
-| `sandbox_list` | 列出本桥接器管理的 Sandbox |
-| `sandbox_snapshot` | 文件系统快照为 Image，可发布 Named Image |
-| `sandbox_terminate` | 终止 Sandbox |
+Gateway 只把 Secret **名称**传给 Modal。Sandbox 内临时 `GIT_ASKPASS` 从环境变量 `$GH_TOKEN` 读取凭据；token 值不会拼进 clone URL、API response 或事件日志。
 
-## 文件系统
+## 默认 Workspace 环境
 
-使用 Modal 当前 Filesystem API：
-
-| 工具 | 用途 |
-|---|---|
-| `sandbox_file_read` | 读取 UTF-8 文本文件 |
-| `sandbox_file_write` | 写入 UTF-8 文本文件 |
-| `sandbox_file_list` | 列目录 |
-| `sandbox_directory_create` | 建目录 |
-| `sandbox_file_remove` | 删除文件/目录（拒绝删除 `/`） |
-
-## Modal Functions / Apps
-
-| 工具 | 用途 |
-|---|---|
-| `function_call` | 同步调用已部署 Function |
-| `function_spawn` | 异步启动 Function |
-| `function_call_get` | 轮询/等待 FunctionCall |
-| `function_call_cancel` | 取消 FunctionCall |
-| `app_get` | 查询 App |
-| `app_list` | 列出 Apps |
-
-## 默认 Sandbox Image
-
-不传 `image_name/image_id` 时使用 Debian Slim，并预装：
+未指定 Named Image 时使用 Debian Slim，并预装：
 
 ```text
 ca-certificates
@@ -255,80 +366,26 @@ wget
 uv
 ```
 
-因此默认就可以：
+所以默认 Workspace 就能：
 
 ```text
 git clone
 curl / wget
 uv / pip
 apt
+Python
 ```
 
-实时 Runtime 依赖 Sandbox 内存在 `python3`；默认 Image 满足这一条件。如果使用自定义 Named Image，也应保留 Python 3。
-
-## Named Image
-
-稳定使用时推荐预构建 Named Image，例如：
+默认资源：
 
 ```text
-modal-workspace-base:latest
-modal-workspace-cuda:latest
-modal-workspace-3d:latest
+CPU request       2
+CPU hard limit    4
+Memory request    4096 MiB
+Memory hard limit 8192 MiB
 ```
 
-然后设置：
-
-```text
-MODAL_WORKSPACE_DEFAULT_IMAGE_NAME=modal-workspace-base:latest
-```
-
-避免每次 Workspace 启动都重新安装相同系统依赖。
-
-## CPU / 内存
-
-默认：
-
-```text
-CPU request      = 2
-CPU hard limit   = 4
-Memory request   = 4096 MiB
-Memory hard limit= 8192 MiB
-```
-
-创建 Sandbox 时可调整：
-
-```text
-cpu
-cpu_limit
-memory_mib
-memory_limit_mib
-gpu
-cloud
-region
-```
-
-## 网络
-
-Modal Sandbox 默认允许公网访问，也支持：
-
-```json
-{
-  "outbound_domain_allowlist": [
-    "github.com",
-    "*.githubusercontent.com",
-    "pypi.org",
-    "*.pythonhosted.org"
-  ]
-}
-```
-
-完全断网：
-
-```json
-{
-  "block_network": true
-}
-```
+可按 Workspace 调整 `cpu / cpu_limit / memory / gpu / cloud / region`。
 
 ## Secrets / Volumes：默认拒绝
 
@@ -340,15 +397,29 @@ MODAL_WORKSPACE_ALLOWED_VOLUMES = 空
 MODAL_WORKSPACE_DEFAULT_IMAGE_NAME = None
 ```
 
-因此默认不会允许 Agent 随意挂载账户里的 Secret 或 Volume。
+公开 GitHub clone 不需要任何 Secret。
 
-需要时配置 GitHub Variables：
+可选 GitHub Variables：
 
 ```text
 MODAL_WORKSPACE_ALLOWED_SECRETS=github-agent,huggingface-agent
 MODAL_WORKSPACE_ALLOWED_VOLUMES=model-cache,workspace-cache
 MODAL_WORKSPACE_DEFAULT_IMAGE_NAME=modal-workspace-base:latest
 ```
+
+## Named Image / Snapshot / Volume
+
+推荐长期边界：
+
+```text
+Named Image = 稳定软件环境
+Sandbox     = 当前在线 Workspace
+Snapshot    = 会话保存/恢复/分叉（P4）
+Volume      = dataset / cache / artifact（P4+）
+Git         = 源码版本
+```
+
+当前已有底层 `sandbox_snapshot`，但 v0.5 还没有把它包装成 `workspace_save/resume/fork`；这会在 P4 做，而不是把未完成能力写成已完成。
 
 ## 部署
 
@@ -360,24 +431,27 @@ MODAL_TOKEN_SECRET
 MODAL_WORKSPACE_MCP_TOKEN
 ```
 
-`main` 更新后 **Deploy Modal Gateway** 会：
+`main` 变更后 Deploy workflow 会真实执行：
 
 ```text
-安装项目
-→ 验证 Modal auth
-→ 更新网关 Secret
-→ modal deploy
-→ /healthz + /api/apps smoke test
-→ 创建真实 Sandbox
-→ 验证“进程结束前收到 stdout”
-→ 发送 stdin
-→ 验证实时输出
-→ 自动 terminate 测试 Sandbox
+install
+→ Modal auth
+→ deploy
+→ /healthz
+→ /api/apps
+→ createRemoteWorkspace
+→ 用 ws-* 重新解析 Sandbox tag
+→ Workspace realtime stdout + stdin
+→ cloneGitHubRepoToWorkspace
+→ cursor 拉取 clone events
+→ getWorkspaceGitStatus
+→ 验证 HEAD / remote / repo metadata
+→ terminateRemoteWorkspace
 ```
 
-也就是说 v0.4 的部署成功不再只代表“代码能 import”，而会真实验证 Modal 实时链路。
+因此“Deploy success”代表线上 Workspace + GitHub 中转链路真的跑过，不只是 import/compile 成功。
 
-## ChatGPT 网页版：GPT Actions
+## ChatGPT GPT Actions
 
 OpenAPI：
 
@@ -393,14 +467,15 @@ Auth Type: Bearer
 Key: MODAL_WORKSPACE_MCP_TOKEN
 ```
 
-推荐给 GPT 的行为说明：
+推荐给 GPT 的核心指令：
 
 ```text
-很短的命令使用 executeInModalSandbox。
-安装、下载、Git clone、编译、实验等需要看到过程的任务，优先使用 startRealtimeSandboxExec。
-拿到 exec_id 后持续调用 getRealtimeSandboxExecEvents，并始终把 next_cursor 作为下一次 cursor。
-需要交互输入时使用 sendRealtimeSandboxExecInput。
-任务完成后及时 terminate Sandbox。
+优先使用 Remote Workspace，而不是直接操作 raw Sandbox。
+新任务先 createRemoteWorkspace。
+GitHub 仓库使用 cloneGitHubRepoToWorkspace，不要自己拼带 token 的 git URL。
+安装、下载、Git、编译、实验优先使用 realtime 操作。
+每次读取事件都把 next_cursor 用作下一次 cursor。
+任务完成后 terminateRemoteWorkspace，除非用户明确要求保持在线。
 ```
 
 ## Remote MCP
@@ -409,62 +484,29 @@ Key: MODAL_WORKSPACE_MCP_TOKEN
 https://YOUR-ENDPOINT.modal.run/mcp/
 ```
 
-请求：
+请求头：
 
 ```text
 Authorization: Bearer <MODAL_WORKSPACE_MCP_TOKEN>
 ```
 
-## Snapshot / 恢复
-
-实时运行时使用 Sandbox；需要保存环境时：
-
-```text
-sandbox_snapshot
-```
-
-之后可以从 Image / Named Image 继续创建新的 Sandbox。
-
-长期设计：
-
-```text
-在线状态 = Sandbox
-稳定环境 = Named Image
-会话状态 = Snapshot
-大文件/cache/artifact = Volume
-```
-
 ## 下一阶段
 
-v0.4 只是实时底座 P0。接下来按这个顺序继续：
-
 ```text
-P0 Realtime Runtime       ← 当前
- ↓
-P1 Workspace abstraction
- ↓
-P2 Realtime Git / Repo
+P0 Realtime Runtime       ✅
+P1 Workspace abstraction  ✅ v0.5
+P2 Realtime Git / Repo    ✅ v0.5
  ↓
 P3 Filesystem watch
  ↓
-P4 Snapshot / Resume / Fork
+P4 workspace_save / resume / fork + Volume
  ↓
 P5 Experiment + GPU metrics
  ↓
-P6 Artifact / GitHub 回传
+P6 Artifact / GitHub branch / PR 回传
+ ↓
+WebSocket UI / browser terminal
 ```
-
-未来 Web UI / CLI 会使用 WebSocket；ChatGPT GPT Actions 继续使用 `cursor + long-poll`，两者共享同一套 Event Protocol。
-
-## 安全边界
-
-- `/mcp/` 与 `/api/*` 必须 Bearer token。
-- `/healthz`、`/privacy`、`/action-openapi.json` 公开，但不暴露管理凭据。
-- Secret / Volume deny-by-default。
-- 不要在命令字符串中明文放 token。
-- 实时 stdin、输出和 API 参数都有长度限制。
-- 删除 API 拒绝直接删除 Sandbox 根目录 `/`。
-- 实验完成后及时 terminate Sandbox。
 
 ## 测试
 
@@ -473,12 +515,16 @@ python -m unittest discover -s tests -v
 python -m compileall -q modal_workspace_mcp modal_app.py
 ```
 
-`tests/test_realtime_agent.py` 会验证：
+测试包括：
 
-1. 命令没有结束时就已经能够读到第一段 stdout；
-2. stdin 跨请求输入后，子进程能实时收到并输出。
-
-部署 workflow 还会执行真实 Modal Sandbox E2E。
+- 实时 stdout 必须在进程结束前出现；
+- stdin roundtrip；
+- Workspace ID 校验；
+- GitHub Repo URL / ref / path 安全校验；
+- 私有 Git askpass 不包含 token 值；
+- Modal Sandbox tags API contract；
+- Workspace/Repo Action operationId contract；
+- 生产真实 Workspace + GitHub clone E2E。
 
 ## 项目结构
 
@@ -489,15 +535,17 @@ modal-workspace-mcp/
 │   ├── action_api.py
 │   ├── config.py
 │   ├── helpers.py
-│   ├── realtime_agent.py        # Sandbox 内运行的实时 worker
-│   ├── realtime_service.py      # Gateway → realtime agent
-│   ├── server.py                # FastMCP tools
-│   └── service.py               # Modal 基础能力
+│   ├── realtime_agent.py
+│   ├── realtime_service.py
+│   ├── workspace_service.py
+│   ├── repo_service.py
+│   ├── server.py
+│   └── service.py
 ├── .github/workflows/
 │   ├── ci.yml
-│   └── deploy-modal.yml         # 含真实 realtime E2E
+│   └── deploy-modal.yml
+├── tests/
 ├── plugins/
 ├── skills/
-├── examples/
-└── tests/
+└── examples/
 ```
