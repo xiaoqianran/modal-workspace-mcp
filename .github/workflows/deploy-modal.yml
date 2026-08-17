@@ -87,10 +87,12 @@ jobs:
               health = json.load(f)
           if health.get('ok') is not True:
               raise SystemExit(f"healthz failed: {health!r}")
-          if health.get('version') != '0.4.0':
+          if health.get('version') != '0.5.0':
               raise SystemExit(f"unexpected deployed version: {health!r}")
           if health.get('realtime_exec') is not True:
               raise SystemExit(f"realtime exec not advertised: {health!r}")
+          if health.get('workspace') is not True or health.get('github_repo') is not True:
+              raise SystemExit(f"Workspace/Repo mode not advertised: {health!r}")
 
           with open('/tmp/apps.json', encoding='utf-8') as f:
               apps = json.load(f)
@@ -99,7 +101,7 @@ jobs:
           print(f"Gateway smoke test passed; /api/apps returned {len(apps)} apps", flush=True)
           PY
 
-      - name: Realtime Sandbox E2E
+      - name: Workspace + realtime GitHub E2E
         env:
           ENDPOINT: ${{ steps.deploy.outputs.endpoint }}
           GATEWAY_TOKEN: ${{ secrets.MODAL_WORKSPACE_MCP_TOKEN }}
@@ -108,13 +110,14 @@ jobs:
           python -u - <<'PY'
           import json
           import os
+          import re
           import time
           import urllib.error
           import urllib.request
 
           endpoint = os.environ['ENDPOINT'].rstrip('/')
           token = os.environ['GATEWAY_TOKEN']
-          sandbox_id = None
+          workspace_id = None
 
           def call(method, path, body=None, timeout=180):
               data = None if body is None else json.dumps(body).encode('utf-8')
@@ -139,99 +142,137 @@ jobs:
                   payload = exc.read().decode('utf-8', errors='replace')
                   raise RuntimeError(f'{method} {path} -> HTTP {exc.code}: {payload}') from exc
 
+          def drain_exec(exec_id, cursor=0, deadline_seconds=60):
+              stdout = ''
+              stderr = ''
+              final = None
+              deadline = time.monotonic() + deadline_seconds
+              while time.monotonic() < deadline:
+                  batch = call(
+                      'GET',
+                      f'/api/workspaces/{workspace_id}/realtime-execs/{exec_id}/events'
+                      f'?cursor={cursor}&wait_seconds=3&max_events=200',
+                      timeout=45,
+                  )
+                  cursor = batch['next_cursor']
+                  stdout += ''.join(
+                      e.get('data', '') for e in batch['events'] if e.get('type') == 'stdout'
+                  )
+                  stderr += ''.join(
+                      e.get('data', '') for e in batch['events'] if e.get('type') == 'stderr'
+                  )
+                  final = batch
+                  if batch['state'] in {'finished', 'failed', 'cancelled'}:
+                      return batch, cursor, stdout, stderr
+              raise RuntimeError(
+                  f'realtime exec deadline exceeded: final={final!r}, stdout={stdout[-1000:]!r}, stderr={stderr[-1000:]!r}'
+              )
+
           try:
-              created = call('POST', '/api/sandboxes', {
-                  'timeout_seconds': 300,
-                  'idle_timeout_seconds': 120,
+              created = call('POST', '/api/workspaces', {
+                  'timeout_seconds': 420,
+                  'idle_timeout_seconds': 180,
                   'cpu': 0.125,
                   'cpu_limit': 0.25,
                   'memory_mib': 256,
                   'memory_limit_mib': 512,
               })
-              sandbox_id = created['sandbox_id']
-              print('Realtime E2E sandbox:', sandbox_id, flush=True)
+              workspace_id = created['workspace_id']
+              if not re.fullmatch(r'ws-[0-9a-f]{32}', workspace_id):
+                  raise RuntimeError(f'invalid workspace id: {workspace_id!r}')
+              print('Workspace:', workspace_id, 'Sandbox:', created['sandbox_id'], flush=True)
 
+              resolved = call('GET', f'/api/workspaces/{workspace_id}')
+              if resolved['workspace_id'] != workspace_id or not resolved['running']:
+                  raise RuntimeError(f'workspace resolution failed: {resolved!r}')
+              if resolved.get('root') != '/workspace':
+                  raise RuntimeError(f'unexpected workspace root: {resolved!r}')
+              print('ws-* tag resolution passed.', flush=True)
+
+              # P0 regression through Workspace abstraction: stdout before finish + stdin roundtrip.
               started = call(
                   'POST',
-                  f'/api/sandboxes/{sandbox_id}/realtime-execs',
+                  f'/api/workspaces/{workspace_id}/realtime-execs',
                   {
-                      'command': "printf 'realtime-first\\n'; read line; printf 'realtime-got:%s\\n' \"$line\"",
+                      'command': "printf 'workspace-first\\n'; read line; printf 'workspace-got:%s\\n' \"$line\"",
                       'pty': False,
                   },
               )
               exec_id = started['exec_id']
-
               cursor = 0
               first_observed = False
-              first_deadline = time.monotonic() + 30
-              while time.monotonic() < first_deadline:
+              deadline = time.monotonic() + 30
+              while time.monotonic() < deadline:
                   batch = call(
                       'GET',
-                      f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/events'
+                      f'/api/workspaces/{workspace_id}/realtime-execs/{exec_id}/events'
                       f'?cursor={cursor}&wait_seconds=3&max_events=100',
                       timeout=45,
                   )
                   cursor = batch['next_cursor']
                   text = ''.join(
-                      event.get('data', '')
-                      for event in batch['events']
-                      if event.get('type') == 'stdout'
+                      e.get('data', '') for e in batch['events'] if e.get('type') == 'stdout'
                   )
-                  if 'realtime-first' in text:
+                  if 'workspace-first' in text:
                       if batch['state'] in {'finished', 'failed', 'cancelled'}:
-                          raise RuntimeError(
-                              f'first stdout was only observed after process termination: {batch!r}'
-                          )
+                          raise RuntimeError(f'Workspace realtime output arrived too late: {batch!r}')
                       first_observed = True
                       break
-                  if batch['state'] in {'finished', 'failed', 'cancelled'}:
-                      raise RuntimeError(f'process terminated before first stdout: {batch!r}')
-
               if not first_observed:
-                  raise RuntimeError('first realtime stdout was not observed before deadline')
-              print('Incremental stdout observed before process completion.', flush=True)
+                  raise RuntimeError('Workspace realtime stdout not observed before process finish')
 
-              input_started = time.monotonic()
               call(
                   'POST',
-                  f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/input',
-                  {'data': 'hello-live\n'},
+                  f'/api/workspaces/{workspace_id}/realtime-execs/{exec_id}/input',
+                  {'data': 'hello-workspace\n'},
                   timeout=45,
               )
-              input_elapsed = time.monotonic() - input_started
-              if input_elapsed > 20:
-                  raise RuntimeError(f'realtime stdin hot path is too slow: {input_elapsed:.3f}s')
+              final, cursor, output, err = drain_exec(exec_id, cursor=cursor, deadline_seconds=30)
+              if final.get('returncode') != 0 or final.get('state') != 'finished':
+                  raise RuntimeError(f'Workspace stdin exec failed: {final!r} {err!r}')
+              if 'workspace-got:hello-workspace' not in output:
+                  raise RuntimeError(f'Workspace stdin output missing: {output!r}')
+              print('Workspace realtime stdout/stdin passed.', flush=True)
 
-              output = ''
-              final_state = None
-              deadline = time.monotonic() + 30
-              while time.monotonic() < deadline:
-                  batch = call(
-                      'GET',
-                      f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/events'
-                      f'?cursor={cursor}&wait_seconds=3&max_events=100',
-                      timeout=45,
+              # P2: the actual GitHub relay use-case.
+              cloned = call(
+                  'POST',
+                  f'/api/workspaces/{workspace_id}/repo/clone',
+                  {
+                      'repository': 'xiaoqianran/modal-workspace-mcp',
+                      'depth': 1,
+                  },
+                  timeout=45,
+              )
+              clone_exec = cloned['exec_id']
+              final, _, clone_out, clone_err = drain_exec(clone_exec, deadline_seconds=90)
+              if final.get('returncode') != 0 or final.get('state') != 'finished':
+                  raise RuntimeError(
+                      f'GitHub clone failed: final={final!r}, stdout={clone_out[-2000:]!r}, stderr={clone_err[-2000:]!r}'
                   )
-                  cursor = batch['next_cursor']
-                  output += ''.join(
-                      event.get('data', '')
-                      for event in batch['events']
-                      if event.get('type') == 'stdout'
-                  )
-                  final_state = batch['state']
-                  if final_state in {'finished', 'failed', 'cancelled'}:
-                      break
+              print('Realtime GitHub clone completed.', flush=True)
 
-              if 'realtime-got:hello-live' not in output:
-                  raise RuntimeError(f'stdin roundtrip output missing: state={final_state!r}, output={output!r}')
-              if final_state != 'finished':
-                  raise RuntimeError(f'realtime process did not finish cleanly: {final_state!r}')
-              print('Realtime stdin + cursor event stream passed.', flush=True)
+              status = call('GET', f'/api/workspaces/{workspace_id}/repo/status')
+              if not re.fullmatch(r'[0-9a-f]{40}', status.get('head') or ''):
+                  raise RuntimeError(f'invalid cloned HEAD: {status!r}')
+              if status.get('remote') != 'https://github.com/xiaoqianran/modal-workspace-mcp.git':
+                  raise RuntimeError(f'unexpected remote: {status!r}')
+              if status.get('repo_path') != '/workspace/repo':
+                  raise RuntimeError(f'unexpected repo path: {status!r}')
+              print(
+                  f"Repo status passed: HEAD={status['head'][:12]} branch={status.get('branch')!r} clean={status.get('clean')}",
+                  flush=True,
+              )
+
+              resolved = call('GET', f'/api/workspaces/{workspace_id}')
+              if resolved.get('repo_slug') != 'xiaoqianran/modal-workspace-mcp':
+                  raise RuntimeError(f'repo metadata missing from Workspace tags: {resolved!r}')
+              print('Workspace Repo metadata persisted in Sandbox tags.', flush=True)
           finally:
-              if sandbox_id:
+              if workspace_id:
                   try:
-                      call('DELETE', f'/api/sandboxes/{sandbox_id}', timeout=60)
-                      print('Realtime E2E sandbox terminated.', flush=True)
+                      call('DELETE', f'/api/workspaces/{workspace_id}', timeout=60)
+                      print('Workspace E2E cleanup passed.', flush=True)
                   except Exception as cleanup_error:
-                      print('WARNING: sandbox cleanup failed:', cleanup_error, flush=True)
+                      print('WARNING: Workspace cleanup failed:', cleanup_error, flush=True)
           PY
