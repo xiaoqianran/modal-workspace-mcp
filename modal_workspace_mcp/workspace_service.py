@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import uuid
 from typing import Any
 
@@ -37,23 +38,33 @@ def _workspace_tags(workspace_id: str, extra: dict[str, str] | None = None) -> d
         "workspace-root": WORKSPACE_ROOT,
     }
     for key, value in (extra or {}).items():
-        # sandbox_create_impl 会再次做 tag 长度检查。
         tags[str(key)] = str(value)
     return tags
 
 
 def _workspace_sandbox(workspace_id: str, environment_name: str | None = None):
-    """通过 Modal 原生 Sandbox tags 找回在线 Workspace 对应的 Sandbox。"""
+    """通过 Modal 原生 Sandbox tags 找回在线 Workspace 对应的 Sandbox。
+
+    新创建 Sandbox 的 tag 索引极短时间内可能尚未可见，因此只对“零匹配”做短暂重试；
+    正常热路径首轮命中，不增加等待。
+    """
     import modal
 
     workspace_id = validate_workspace_id(workspace_id)
     app = _sandbox_app(environment_name)
-    matches = list(
-        modal.Sandbox.list(
-            app_id=app.app_id,
-            tags={"managed-by": MANAGED_BY_TAG, "workspace-id": workspace_id},
+    matches = []
+    for attempt in range(6):
+        matches = list(
+            modal.Sandbox.list(
+                app_id=app.app_id,
+                tags={"managed-by": MANAGED_BY_TAG, "workspace-id": workspace_id},
+            )
         )
-    )
+        if matches:
+            break
+        if attempt < 5:
+            time.sleep(0.2)
+
     if not matches:
         raise ValueError(f"Workspace {workspace_id} 不存在或已离线/终止")
     if len(matches) > 1:
