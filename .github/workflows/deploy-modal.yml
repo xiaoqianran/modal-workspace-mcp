@@ -195,7 +195,7 @@ jobs:
               call(
                   'POST',
                   f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/input',
-                  {'data': 'hello-live\\n'},
+                  {'data': 'hello-live\n'},
                   timeout=45,
               )
               input_elapsed = time.monotonic() - input_started
