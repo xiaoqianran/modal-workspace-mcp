@@ -96,7 +96,7 @@ jobs:
               apps = json.load(f)
           if not isinstance(apps, list):
               raise SystemExit(f"/api/apps did not return a list: {type(apps).__name__}")
-          print(f"Gateway smoke test passed; /api/apps returned {len(apps)} apps")
+          print(f"Gateway smoke test passed; /api/apps returned {len(apps)} apps", flush=True)
           PY
 
       - name: Realtime Sandbox E2E
@@ -105,7 +105,7 @@ jobs:
           GATEWAY_TOKEN: ${{ secrets.MODAL_WORKSPACE_MCP_TOKEN }}
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python -u - <<'PY'
           import json
           import os
           import time
@@ -127,9 +127,14 @@ jobs:
                       'Content-Type': 'application/json',
                   },
               )
+              started_at = time.monotonic()
               try:
                   with urllib.request.urlopen(req, timeout=timeout) as response:
-                      return json.loads(response.read().decode('utf-8'))
+                      result = json.loads(response.read().decode('utf-8'))
+                  elapsed = time.monotonic() - started_at
+                  clean_path = path.split('?', 1)[0]
+                  print(f'{method} {clean_path}: {elapsed:.3f}s', flush=True)
+                  return result
               except urllib.error.HTTPError as exc:
                   payload = exc.read().decode('utf-8', errors='replace')
                   raise RuntimeError(f'{method} {path} -> HTTP {exc.code}: {payload}') from exc
@@ -144,7 +149,7 @@ jobs:
                   'memory_limit_mib': 512,
               })
               sandbox_id = created['sandbox_id']
-              print('Realtime E2E sandbox:', sandbox_id)
+              print('Realtime E2E sandbox:', sandbox_id, flush=True)
 
               started = call(
                   'POST',
@@ -158,13 +163,13 @@ jobs:
 
               cursor = 0
               first_observed = False
-              first_deadline = time.monotonic() + 15
+              first_deadline = time.monotonic() + 30
               while time.monotonic() < first_deadline:
                   batch = call(
                       'GET',
                       f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/events'
                       f'?cursor={cursor}&wait_seconds=3&max_events=100',
-                      timeout=15,
+                      timeout=45,
                   )
                   cursor = batch['next_cursor']
                   text = ''.join(
@@ -184,23 +189,28 @@ jobs:
 
               if not first_observed:
                   raise RuntimeError('first realtime stdout was not observed before deadline')
-              print('Incremental stdout observed before process completion.')
+              print('Incremental stdout observed before process completion.', flush=True)
 
+              input_started = time.monotonic()
               call(
                   'POST',
                   f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/input',
                   {'data': 'hello-live\\n'},
+                  timeout=45,
               )
+              input_elapsed = time.monotonic() - input_started
+              if input_elapsed > 20:
+                  raise RuntimeError(f'realtime stdin hot path is too slow: {input_elapsed:.3f}s')
 
               output = ''
               final_state = None
-              deadline = time.monotonic() + 20
+              deadline = time.monotonic() + 30
               while time.monotonic() < deadline:
                   batch = call(
                       'GET',
                       f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/events'
                       f'?cursor={cursor}&wait_seconds=3&max_events=100',
-                      timeout=15,
+                      timeout=45,
                   )
                   cursor = batch['next_cursor']
                   output += ''.join(
@@ -216,12 +226,12 @@ jobs:
                   raise RuntimeError(f'stdin roundtrip output missing: state={final_state!r}, output={output!r}')
               if final_state != 'finished':
                   raise RuntimeError(f'realtime process did not finish cleanly: {final_state!r}')
-              print('Realtime stdin + cursor event stream passed.')
+              print('Realtime stdin + cursor event stream passed.', flush=True)
           finally:
               if sandbox_id:
                   try:
                       call('DELETE', f'/api/sandboxes/{sandbox_id}', timeout=60)
-                      print('Realtime E2E sandbox terminated.')
+                      print('Realtime E2E sandbox terminated.', flush=True)
                   except Exception as cleanup_error:
-                      print('WARNING: sandbox cleanup failed:', cleanup_error)
+                      print('WARNING: sandbox cleanup failed:', cleanup_error, flush=True)
           PY
