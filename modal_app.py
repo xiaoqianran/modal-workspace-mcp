@@ -18,6 +18,27 @@ gateway_image = (
 )
 
 
+@app.function(image=gateway_image, timeout=3600)
+def filesystem_watch_worker(
+    sandbox_id: str,
+    watch_id: str,
+    path: str,
+    recursive: bool,
+    event_types: list[str],
+    timeout_seconds: int,
+):
+    from modal_workspace_mcp.fs_watch_service import filesystem_watch_worker_impl
+
+    return filesystem_watch_worker_impl(
+        sandbox_id,
+        watch_id,
+        path,
+        recursive,
+        event_types,
+        timeout_seconds,
+    )
+
+
 @app.function(
     image=gateway_image,
     secrets=[modal.Secret.from_name(GATEWAY_SECRET_NAME)],
@@ -29,6 +50,8 @@ def web():
     from fastapi.responses import JSONResponse, PlainTextResponse
 
     from modal_workspace_mcp.action_api import router as action_router
+    from modal_workspace_mcp.fs_watch_api import router as fs_watch_router
+    from modal_workspace_mcp.fs_watch_mcp import register_fs_watch_tools
     from modal_workspace_mcp.helpers import require_bearer_token
     from modal_workspace_mcp.server import make_mcp_server
 
@@ -62,18 +85,20 @@ def web():
             return await self.inner(scope, receive, send)
 
     mcp = make_mcp_server()
+    register_fs_watch_tools(mcp)
     mcp_app = mcp.http_app(transport="streamable-http", stateless_http=True)
 
     api = FastAPI(
         title="Modal Workspace Gateway",
-        version="0.5.0",
+        version="0.6.0",
         description=(
-            "实时 Remote Workspace：稳定 ws-*、增量事件流、GitHub Repo clone/fetch/checkout/status/diff，"
-            "以及底层 Modal Sandbox / Function 能力。"
+            "实时 Remote Workspace：稳定 ws-*、进程增量事件、GitHub Repo 操作、"
+            "原生 Modal filesystem.watch 文件事件，以及底层 Sandbox / Function 能力。"
         ),
         lifespan=mcp_app.router.lifespan_context,
     )
     api.include_router(action_router)
+    api.include_router(fs_watch_router)
 
     @api.exception_handler(ValueError)
     async def value_error_handler(_: Request, exc: ValueError):
@@ -114,8 +139,8 @@ def web():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.5.0",
-            "mode": "realtime-workspace-repo",
+            "version": "0.6.0",
+            "mode": "realtime-workspace-repo-filewatch",
             "health": "/healthz",
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
@@ -126,10 +151,11 @@ def web():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.5.0",
+            "version": "0.6.0",
             "realtime_exec": True,
             "workspace": True,
             "github_repo": True,
+            "filesystem_watch": True,
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
         }

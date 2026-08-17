@@ -1,0 +1,169 @@
+name: P3 Filesystem Watch E2E
+
+on:
+  workflow_run:
+    workflows: ["Deploy Modal Gateway"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project
+        run: python -m pip install .
+
+      - name: Discover deployed gateway
+        id: gateway
+        run: |
+          set -euo pipefail
+          endpoint="$(python - <<'PY'
+          import modal
+          fn = modal.Function.from_name("modal-workspace-mcp", "web")
+          url = fn.get_web_url()
+          if not url:
+              raise SystemExit("deployed web URL not found")
+          print(url.rstrip('/'))
+          PY
+          )"
+          echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
+          echo "Gateway: $endpoint"
+
+      - name: Native filesystem watch E2E
+        env:
+          ENDPOINT: ${{ steps.gateway.outputs.endpoint }}
+          GATEWAY_TOKEN: ${{ secrets.MODAL_WORKSPACE_MCP_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -u - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          endpoint = os.environ['ENDPOINT'].rstrip('/')
+          token = os.environ['GATEWAY_TOKEN']
+          workspace_id = None
+          watch_id = None
+
+          def call(method, path, body=None, timeout=90):
+              data = None if body is None else json.dumps(body).encode('utf-8')
+              request = urllib.request.Request(
+                  endpoint + path,
+                  data=data,
+                  method=method,
+                  headers={
+                      'Authorization': f'Bearer {token}',
+                      'Content-Type': 'application/json',
+                  },
+              )
+              started = time.monotonic()
+              try:
+                  with urllib.request.urlopen(request, timeout=timeout) as response:
+                      result = json.loads(response.read().decode('utf-8'))
+              except urllib.error.HTTPError as exc:
+                  payload = exc.read().decode('utf-8', errors='replace')
+                  raise RuntimeError(f'{method} {path} -> HTTP {exc.code}: {payload}') from exc
+              print(f'{method} {path.split("?", 1)[0]}: {time.monotonic() - started:.3f}s', flush=True)
+              return result
+
+          try:
+              health = call('GET', '/healthz')
+              if health.get('version') != '0.6.0' or health.get('filesystem_watch') is not True:
+                  raise RuntimeError(f'unexpected health payload: {health!r}')
+
+              created = call('POST', '/api/workspaces', {
+                  'timeout_seconds': 300,
+                  'idle_timeout_seconds': 120,
+                  'cpu': 0.125,
+                  'cpu_limit': 0.25,
+                  'memory_mib': 256,
+                  'memory_limit_mib': 512,
+              })
+              workspace_id = created['workspace_id']
+              print('Workspace:', workspace_id, flush=True)
+
+              watch = call('POST', f'/api/workspaces/{workspace_id}/file-watches', {
+                  'path': '/workspace',
+                  'recursive': True,
+                  'event_types': ['create', 'modify', 'remove'],
+                  'timeout_seconds': 90,
+              })
+              watch_id = watch['watch_id']
+              print('File watch:', watch_id, flush=True)
+
+              deadline = time.monotonic() + 30
+              while time.monotonic() < deadline:
+                  status = call('GET', f'/api/workspaces/{workspace_id}/file-watches/{watch_id}')
+                  if status['state'] == 'running':
+                      break
+                  if status['state'] in {'failed', 'finished', 'cancelled'}:
+                      raise RuntimeError(f'watch did not enter running state: {status!r}')
+                  time.sleep(0.5)
+              else:
+                  raise RuntimeError('watch did not become running before deadline')
+
+              target = '/workspace/p3-e2e/watch.txt'
+              result = call('POST', f'/api/workspaces/{workspace_id}/exec', {
+                  'command': (
+                      "set -e; mkdir -p /workspace/p3-e2e; "
+                      "printf one > /workspace/p3-e2e/watch.txt; sleep 1; "
+                      "printf two >> /workspace/p3-e2e/watch.txt; sleep 1; "
+                      "rm /workspace/p3-e2e/watch.txt"
+                  ),
+                  'timeout_seconds': 30,
+              })
+              if result.get('returncode') != 0:
+                  raise RuntimeError(f'file mutation command failed: {result!r}')
+
+              cursor = 0
+              seen = set()
+              events_seen = []
+              deadline = time.monotonic() + 30
+              while time.monotonic() < deadline and seen != {'create', 'modify', 'remove'}:
+                  batch = call(
+                      'GET',
+                      f'/api/workspaces/{workspace_id}/file-watches/{watch_id}/events'
+                      f'?cursor={cursor}&wait_seconds=3&max_events=200',
+                      timeout=45,
+                  )
+                  cursor = batch['next_cursor']
+                  if batch.get('cursor_expired'):
+                      raise RuntimeError(f'cursor expired during tiny E2E: {batch!r}')
+                  for event in batch['events']:
+                      if target in event.get('paths', []):
+                          seen.add(event.get('type'))
+                          events_seen.append(event)
+                  if batch['state'] == 'failed':
+                      raise RuntimeError(f'watch worker failed: {batch!r}')
+
+              if seen != {'create', 'modify', 'remove'}:
+                  raise RuntimeError(f'missing native file events: seen={seen!r}, events={events_seen!r}')
+              print('Native file watch passed:', sorted(seen), flush=True)
+
+              cancel = call('DELETE', f'/api/workspaces/{workspace_id}/file-watches/{watch_id}')
+              if cancel.get('state') not in {'cancelled', 'finished'}:
+                  raise RuntimeError(f'watch cancellation failed: {cancel!r}')
+              print('File watch cleanup passed.', flush=True)
+          finally:
+              if workspace_id:
+                  try:
+                      call('DELETE', f'/api/workspaces/{workspace_id}', timeout=60)
+                      print('Workspace cleanup passed.', flush=True)
+                  except Exception as cleanup_error:
+                      print('WARNING: Workspace cleanup failed:', cleanup_error, flush=True)
+          PY

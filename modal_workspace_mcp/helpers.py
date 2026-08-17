@@ -54,6 +54,10 @@ def validate_packages(packages: Iterable[str] | None, *, field: str) -> list[str
 def validate_remote_path(path: str, *, allow_root: bool = True) -> str:
     if not path or not path.startswith("/"):
         raise ValueError("远程路径必须是绝对路径")
+    if "\x00" in path:
+        raise ValueError("远程路径不能包含 NUL")
+    if any(part == ".." for part in path.split("/")):
+        raise ValueError("远程路径不能包含 ..")
     normalized = str(PurePosixPath(path))
     if not allow_root and normalized == "/":
         raise ValueError("拒绝对 Sandbox 根目录 / 执行该操作")
