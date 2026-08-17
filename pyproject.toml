@@ -1,7 +1,7 @@
 [project]
 name = "modal-workspace-mcp"
-version = "0.1.0"
-description = "Remote MCP bridge from GitHub Copilot and other agents to Modal Sandboxes and Functions"
+version = "0.2.0"
+description = "Remote Modal execution bridge for ChatGPT GPT Actions, MCP clients, and GitHub Copilot"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
