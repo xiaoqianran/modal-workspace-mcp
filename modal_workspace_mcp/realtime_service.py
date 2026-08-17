@@ -43,6 +43,8 @@ def _run_agent(sb, *args: str, timeout: int = 30, secrets=None, env=None) -> dic
             raise ValueError("exec_id 不存在于该 Sandbox")
         if "process is not running" in message:
             raise ValueError("目标实时进程已经结束")
+        if "No such file or directory" in message and _AGENT_REMOTE_PATH in message:
+            raise ValueError("该 Sandbox 尚未安装 realtime agent；请重新启动实时命令")
         raise RuntimeError(message)
     try:
         return json.loads(stdout)
@@ -50,8 +52,12 @@ def _run_agent(sb, *args: str, timeout: int = 30, secrets=None, env=None) -> dic
         raise RuntimeError(f"realtime agent 返回了无效 JSON: {stdout[:1000]}") from exc
 
 
-def _prepare_agent(sb) -> None:
-    # 当前 Filesystem API 的参数顺序是 write_text(data, remote_path)。
+def _install_agent(sb) -> None:
+    """每个 Sandbox 仅在启动首个 realtime exec 时安装 agent。
+
+    write_text 会自动创建父目录。后续 events/input/status/cancel 直接执行已安装的 agent，
+    避免在实时热路径重复 Filesystem RPC 和覆盖正在使用的脚本。
+    """
     sb.filesystem.write_text(_agent_source(), _AGENT_REMOTE_PATH)
 
 
@@ -84,7 +90,7 @@ def sandbox_realtime_exec_start_impl(
 
     sb = _sandbox_handle(sandbox_id)
     try:
-        _prepare_agent(sb)
+        _install_agent(sb)
         result = _run_agent(
             sb,
             "start",
@@ -122,7 +128,6 @@ def sandbox_realtime_exec_events_impl(
 
     sb = _sandbox_handle(sandbox_id)
     try:
-        _prepare_agent(sb)
         result = _run_agent(
             sb,
             "events",
@@ -146,7 +151,6 @@ def sandbox_realtime_exec_status_impl(sandbox_id: str, exec_id: str) -> dict[str
     exec_id = _validate_exec_id(exec_id)
     sb = _sandbox_handle(sandbox_id)
     try:
-        _prepare_agent(sb)
         result = _run_agent(sb, "status", "--exec-id", exec_id)
         result["sandbox_id"] = sandbox_id
         return result
@@ -169,7 +173,6 @@ def sandbox_realtime_exec_input_impl(
 
     sb = _sandbox_handle(sandbox_id)
     try:
-        _prepare_agent(sb)
         args = ["input", "--exec-id", exec_id, "--data-b64", data_b64]
         if eof:
             args.append("--eof")
@@ -192,7 +195,6 @@ def sandbox_realtime_exec_cancel_impl(
 
     sb = _sandbox_handle(sandbox_id)
     try:
-        _prepare_agent(sb)
         result = _run_agent(
             sb,
             "cancel",
