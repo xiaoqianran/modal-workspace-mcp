@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Remote Modal execution bridge for ChatGPT GPT Actions, MCP clients, and GitHub Copilot"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "xiaoqianran" }]
 dependencies = [
   "modal>=1.4.1,<2",
@@ -21,3 +21,6 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.setuptools]
+packages = ["modal_workspace_mcp"]
