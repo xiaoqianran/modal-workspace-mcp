@@ -16,7 +16,7 @@ from .workspace_service import (
 )
 
 _GITHUB_PART_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_GIT_REF_RE = re.compile(r"^[A-Za-z0-9._/@+:-]+$")
+_GIT_REF_RE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
 
 
 def normalize_github_repository(repository: str) -> tuple[str, str]:
@@ -63,6 +63,8 @@ def validate_git_ref(ref: str | None) -> str | None:
     if len(ref) > 255 or ref.startswith("-") or not _GIT_REF_RE.fullmatch(ref):
         raise ValueError("Git ref 格式无效")
     if ".." in ref or "@{" in ref or ref.endswith(".") or ref.endswith("/"):
+        raise ValueError("Git ref 包含不安全/无效序列")
+    if ref.startswith("/") or "//" in ref or ref.endswith(".lock"):
         raise ValueError("Git ref 包含不安全/无效序列")
     return ref
 
@@ -142,6 +144,8 @@ def repo_clone_impl(
         if part
     )
 
+    # 这里记录的是“目标 Repo”。clone 是否成功由实时 exec 的 exit 事件决定。
+    # 后续 repo_status 会校验目录和 Git 元数据，因此失败 clone 不会被误报为 ready。
     workspace_update_tags(
         workspace_id,
         {
