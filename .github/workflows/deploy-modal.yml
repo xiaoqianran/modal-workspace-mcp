@@ -110,7 +110,6 @@ jobs:
           import os
           import time
           import urllib.error
-          import urllib.parse
           import urllib.request
 
           endpoint = os.environ['ENDPOINT'].rstrip('/')
@@ -157,21 +156,34 @@ jobs:
               )
               exec_id = started['exec_id']
 
-              first = call(
-                  'GET',
-                  f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/events?cursor=0&wait_seconds=10&max_events=100',
-                  timeout=30,
-              )
-              first_text = ''.join(
-                  event.get('data', '')
-                  for event in first['events']
-                  if event.get('type') == 'stdout'
-              )
-              if 'realtime-first' not in first_text:
-                  raise RuntimeError(f'first realtime stdout was not observed: {first!r}')
-              if first['state'] in {'finished', 'failed', 'cancelled'}:
-                  raise RuntimeError(f'process finished before stdin roundtrip: {first!r}')
-              cursor = first['next_cursor']
+              cursor = 0
+              first_observed = False
+              first_deadline = time.monotonic() + 15
+              while time.monotonic() < first_deadline:
+                  batch = call(
+                      'GET',
+                      f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/events'
+                      f'?cursor={cursor}&wait_seconds=3&max_events=100',
+                      timeout=15,
+                  )
+                  cursor = batch['next_cursor']
+                  text = ''.join(
+                      event.get('data', '')
+                      for event in batch['events']
+                      if event.get('type') == 'stdout'
+                  )
+                  if 'realtime-first' in text:
+                      if batch['state'] in {'finished', 'failed', 'cancelled'}:
+                          raise RuntimeError(
+                              f'first stdout was only observed after process termination: {batch!r}'
+                          )
+                      first_observed = True
+                      break
+                  if batch['state'] in {'finished', 'failed', 'cancelled'}:
+                      raise RuntimeError(f'process terminated before first stdout: {batch!r}')
+
+              if not first_observed:
+                  raise RuntimeError('first realtime stdout was not observed before deadline')
               print('Incremental stdout observed before process completion.')
 
               call(
