@@ -87,10 +87,129 @@ jobs:
               health = json.load(f)
           if health.get('ok') is not True:
               raise SystemExit(f"healthz failed: {health!r}")
+          if health.get('version') != '0.4.0':
+              raise SystemExit(f"unexpected deployed version: {health!r}")
+          if health.get('realtime_exec') is not True:
+              raise SystemExit(f"realtime exec not advertised: {health!r}")
 
           with open('/tmp/apps.json', encoding='utf-8') as f:
               apps = json.load(f)
           if not isinstance(apps, list):
               raise SystemExit(f"/api/apps did not return a list: {type(apps).__name__}")
           print(f"Gateway smoke test passed; /api/apps returned {len(apps)} apps")
+          PY
+
+      - name: Realtime Sandbox E2E
+        env:
+          ENDPOINT: ${{ steps.deploy.outputs.endpoint }}
+          GATEWAY_TOKEN: ${{ secrets.MODAL_WORKSPACE_MCP_TOKEN }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          endpoint = os.environ['ENDPOINT'].rstrip('/')
+          token = os.environ['GATEWAY_TOKEN']
+          sandbox_id = None
+
+          def call(method, path, body=None, timeout=180):
+              data = None if body is None else json.dumps(body).encode('utf-8')
+              req = urllib.request.Request(
+                  endpoint + path,
+                  data=data,
+                  method=method,
+                  headers={
+                      'Authorization': f'Bearer {token}',
+                      'Content-Type': 'application/json',
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as response:
+                      return json.loads(response.read().decode('utf-8'))
+              except urllib.error.HTTPError as exc:
+                  payload = exc.read().decode('utf-8', errors='replace')
+                  raise RuntimeError(f'{method} {path} -> HTTP {exc.code}: {payload}') from exc
+
+          try:
+              created = call('POST', '/api/sandboxes', {
+                  'timeout_seconds': 300,
+                  'idle_timeout_seconds': 120,
+                  'cpu': 0.125,
+                  'cpu_limit': 0.25,
+                  'memory_mib': 256,
+                  'memory_limit_mib': 512,
+              })
+              sandbox_id = created['sandbox_id']
+              print('Realtime E2E sandbox:', sandbox_id)
+
+              started = call(
+                  'POST',
+                  f'/api/sandboxes/{sandbox_id}/realtime-execs',
+                  {
+                      'command': "printf 'realtime-first\\n'; read line; printf 'realtime-got:%s\\n' \"$line\"",
+                      'pty': False,
+                  },
+              )
+              exec_id = started['exec_id']
+
+              first = call(
+                  'GET',
+                  f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/events?cursor=0&wait_seconds=10&max_events=100',
+                  timeout=30,
+              )
+              first_text = ''.join(
+                  event.get('data', '')
+                  for event in first['events']
+                  if event.get('type') == 'stdout'
+              )
+              if 'realtime-first' not in first_text:
+                  raise RuntimeError(f'first realtime stdout was not observed: {first!r}')
+              if first['state'] in {'finished', 'failed', 'cancelled'}:
+                  raise RuntimeError(f'process finished before stdin roundtrip: {first!r}')
+              cursor = first['next_cursor']
+              print('Incremental stdout observed before process completion.')
+
+              call(
+                  'POST',
+                  f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/input',
+                  {'data': 'hello-live\\n'},
+              )
+
+              output = ''
+              final_state = None
+              deadline = time.monotonic() + 20
+              while time.monotonic() < deadline:
+                  batch = call(
+                      'GET',
+                      f'/api/sandboxes/{sandbox_id}/realtime-execs/{exec_id}/events'
+                      f'?cursor={cursor}&wait_seconds=3&max_events=100',
+                      timeout=15,
+                  )
+                  cursor = batch['next_cursor']
+                  output += ''.join(
+                      event.get('data', '')
+                      for event in batch['events']
+                      if event.get('type') == 'stdout'
+                  )
+                  final_state = batch['state']
+                  if final_state in {'finished', 'failed', 'cancelled'}:
+                      break
+
+              if 'realtime-got:hello-live' not in output:
+                  raise RuntimeError(f'stdin roundtrip output missing: state={final_state!r}, output={output!r}')
+              if final_state != 'finished':
+                  raise RuntimeError(f'realtime process did not finish cleanly: {final_state!r}')
+              print('Realtime stdin + cursor event stream passed.')
+          finally:
+              if sandbox_id:
+                  try:
+                      call('DELETE', f'/api/sandboxes/{sandbox_id}', timeout=60)
+                      print('Realtime E2E sandbox terminated.')
+                  except Exception as cleanup_error:
+                      print('WARNING: sandbox cleanup failed:', cleanup_error)
           PY
