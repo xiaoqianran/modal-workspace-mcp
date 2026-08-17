@@ -40,6 +40,10 @@ class HelpersTest(unittest.TestCase):
             validate_remote_path("tmp/a")
         with self.assertRaises(ValueError):
             validate_remote_path("/", allow_root=False)
+        with self.assertRaises(ValueError):
+            validate_remote_path("/workspace/../etc")
+        with self.assertRaises(ValueError):
+            validate_remote_path("/tmp/../../etc/passwd")
 
     def test_network_validation(self):
         self.assertEqual(validate_cidrs(["10.0.0.1/24"], field="cidr"), ["10.0.0.0/24"])
