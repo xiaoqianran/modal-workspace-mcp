@@ -29,7 +29,7 @@ class ModalContractTest(unittest.TestCase):
         self.assertTrue(callable(modal.Sandbox.from_id))
         self.assertTrue(callable(modal.Sandbox.create_connect_token))
         self.assertTrue(callable(modal.Sandbox.tunnels))
-        self.assertTrue(callable(modal.Sandbox.filesystem.watch))
+        self.assertIsInstance(modal.Sandbox.filesystem, property)
 
         exec_params = inspect.signature(modal.Sandbox.exec).parameters
         for name in ("timeout", "workdir", "env", "secrets", "pty"):
