@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 
 import modal
@@ -46,10 +44,16 @@ def web():
             protected = path.startswith("/mcp") or path.startswith("/api")
             if not protected:
                 return await self.inner(scope, receive, send)
-            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+            headers = {
+                k.decode("latin-1").lower(): v.decode("latin-1")
+                for k, v in scope.get("headers", [])
+            }
             expected = os.getenv("MODAL_WORKSPACE_MCP_TOKEN")
             if not expected:
-                response = JSONResponse({"error": "网关尚未配置 MODAL_WORKSPACE_MCP_TOKEN"}, status_code=503)
+                response = JSONResponse(
+                    {"error": "网关尚未配置 MODAL_WORKSPACE_MCP_TOKEN"},
+                    status_code=503,
+                )
                 return await response(scope, receive, send)
             if not require_bearer_token(headers.get("authorization"), expected):
                 response = JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -61,7 +65,7 @@ def web():
 
     api = FastAPI(
         title="Modal Workspace Gateway",
-        version="0.3.0",
+        version="0.3.1",
         description="让 ChatGPT / MCP 客户端通过受控 API 使用用户自己的 Modal Sandbox 与已部署 Functions。",
         lifespan=mcp_app.router.lifespan_context,
     )
@@ -69,7 +73,10 @@ def web():
 
     @api.exception_handler(ValueError)
     async def value_error_handler(_: Request, exc: ValueError):
-        return JSONResponse({"error": str(exc), "type": exc.__class__.__name__}, status_code=400)
+        return JSONResponse(
+            {"error": str(exc), "type": exc.__class__.__name__},
+            status_code=400,
+        )
 
     @api.exception_handler(Exception)
     async def modal_error_handler(_: Request, exc: Exception):
@@ -87,17 +94,34 @@ def web():
             )
             for kind, status in mapping:
                 if isinstance(exc, kind):
-                    return JSONResponse({"error": str(exc), "type": exc.__class__.__name__}, status_code=status)
+                    return JSONResponse(
+                        {"error": str(exc), "type": exc.__class__.__name__},
+                        status_code=status,
+                    )
         except Exception:
             pass
-        return JSONResponse({"error": str(exc), "type": exc.__class__.__name__}, status_code=502)
+        return JSONResponse(
+            {"error": str(exc), "type": exc.__class__.__name__},
+            status_code=502,
+        )
+
+    @api.get("/", include_in_schema=False)
+    async def root():
+        return {
+            "ok": True,
+            "service": "modal-workspace-mcp",
+            "version": "0.3.1",
+            "health": "/healthz",
+            "mcp": "/mcp/",
+            "gpt_actions_schema": "/action-openapi.json",
+        }
 
     @api.get("/healthz", include_in_schema=False)
     async def healthz():
         return {
             "ok": True,
             "service": "modal-workspace-mcp",
-            "version": "0.3.0",
+            "version": "0.3.1",
             "mcp": "/mcp/",
             "gpt_actions_schema": "/action-openapi.json",
         }
@@ -113,7 +137,9 @@ def web():
     async def action_openapi(request: Request):
         schema = api.openapi()
         schema["servers"] = [{"url": str(request.base_url).rstrip("/")}]
-        schema.setdefault("components", {}).setdefault("securitySchemes", {})["GatewayBearer"] = {
+        schema.setdefault("components", {}).setdefault("securitySchemes", {})[
+            "GatewayBearer"
+        ] = {
             "type": "http",
             "scheme": "bearer",
         }
