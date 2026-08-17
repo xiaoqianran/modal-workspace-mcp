@@ -87,12 +87,14 @@ jobs:
               health = json.load(f)
           if health.get('ok') is not True:
               raise SystemExit(f"healthz failed: {health!r}")
-          if health.get('version') != '0.5.0':
+          if health.get('version') != '0.6.0':
               raise SystemExit(f"unexpected deployed version: {health!r}")
           if health.get('realtime_exec') is not True:
               raise SystemExit(f"realtime exec not advertised: {health!r}")
           if health.get('workspace') is not True or health.get('github_repo') is not True:
               raise SystemExit(f"Workspace/Repo mode not advertised: {health!r}")
+          if health.get('filesystem_watch') is not True:
+              raise SystemExit(f"filesystem watch not advertised: {health!r}")
 
           with open('/tmp/apps.json', encoding='utf-8') as f:
               apps = json.load(f)
